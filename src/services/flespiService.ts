@@ -7,55 +7,100 @@ const BASE_DIRECT = 'https://flespi.io';
 const BASE_PROXY = '/api/flespi';
 
 function cleanToken(rawToken: string): string {
-  let token = (rawToken || '').trim();
+  if (!rawToken) return '';
+  let token = String(rawToken).trim();
+  // Strip surrounding quotes
+  if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1).trim();
+  }
+  // Strip common prefixes
   if (token.toLowerCase().startsWith('flespitoken ')) {
     token = token.slice(12).trim();
+  } else if (token.toLowerCase().startsWith('bearer ')) {
+    token = token.slice(7).trim();
   }
   return token;
 }
 
 /**
- * Universal fetcher with automatic Vite proxy + direct fallback
+ * Universal Flespi API fetcher.
+ * Primary: Directly queries https://flespi.io (which has full native CORS support for Vercel production and all domains).
+ * Secondary: Fallback to /api/flespi proxy (Vite dev proxy or vercel.json rewrite) if direct fetch encounters a client-side firewall.
  */
 async function flespiFetch(endpoint: string, token: string): Promise<any> {
   const cleaned = cleanToken(token);
+  if (!cleaned) {
+    throw new Error('Please provide a valid Flespi token.');
+  }
+
   const headers: Record<string, string> = {
     Authorization: `FlespiToken ${cleaned}`,
     Accept: 'application/json',
   };
 
-  // Try proxy first
+  // 1. Primary: Direct request to https://flespi.io (CORS supported on all production environments)
   try {
-    const res = await fetch(`${BASE_PROXY}${endpoint}`, { headers });
-    if (res.ok) {
-      return await res.json();
-    }
-    if (res.status === 401 || res.status === 403 || res.status === 400 || res.status === 404) {
-      const errData = await res.json().catch(() => ({}));
-      const msg = errData?.errors?.[0]?.reason || errData?.message || `HTTP ${res.status} ${res.statusText}`;
+    const directRes = await fetch(`${BASE_DIRECT}${endpoint}`, {
+      method: 'GET',
+      headers,
+    });
+
+    const contentType = directRes.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await directRes.json();
+      if (directRes.ok) {
+        return data;
+      }
+      // Flespi error payload returned
+      const errorReason = data?.errors?.[0]?.reason || data?.message;
+      const msg = errorReason
+        ? `Flespi API error: ${errorReason} (${directRes.status})`
+        : `HTTP ${directRes.status} ${directRes.statusText}`;
       const err = new Error(msg);
-      (err as any).status = res.status;
-      (err as any).data = errData;
+      (err as any).status = directRes.status;
+      (err as any).data = data;
+      throw err;
+    }
+
+    if (!directRes.ok) {
+      const msg = `Flespi API HTTP ${directRes.status}: ${directRes.statusText}`;
+      const err = new Error(msg);
+      (err as any).status = directRes.status;
       throw err;
     }
   } catch (err: any) {
-    if (err.status) {
+    // If it's an explicit authentication error from Flespi (401 invalid token, 403 forbidden), throw immediately
+    if (err.status === 401 || err.status === 403) {
       throw err;
     }
-    // Fallback to direct URL if proxy is unavailable
+    console.warn('Direct Flespi call encountered an issue, trying fallback proxy:', err.message);
   }
 
-  // Fallback to direct URL
-  const directRes = await fetch(`${BASE_DIRECT}${endpoint}`, { headers });
-  if (!directRes.ok) {
-    const errData = await directRes.json().catch(() => ({}));
-    const msg = errData?.errors?.[0]?.reason || errData?.message || `HTTP ${directRes.status} ${directRes.statusText}`;
-    const err = new Error(msg);
-    (err as any).status = directRes.status;
-    (err as any).data = errData;
-    throw err;
+  // 2. Secondary: Fallback to proxy route
+  try {
+    const proxyRes = await fetch(`${BASE_PROXY}${endpoint}`, { headers });
+    const contentType = proxyRes.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await proxyRes.json();
+      if (proxyRes.ok) {
+        return data;
+      }
+      const errorReason = data?.errors?.[0]?.reason || data?.message;
+      const msg = errorReason
+        ? `Flespi API error: ${errorReason} (${proxyRes.status})`
+        : `HTTP ${proxyRes.status} ${proxyRes.statusText}`;
+      const err = new Error(msg);
+      (err as any).status = proxyRes.status;
+      (err as any).data = data;
+      throw err;
+    }
+  } catch (proxyErr: any) {
+    if (proxyErr.status === 401 || proxyErr.status === 403) {
+      throw proxyErr;
+    }
   }
-  return await directRes.json();
+
+  throw new Error('Failed to connect to Flespi API. Please verify token and network connectivity.');
 }
 
 /**
