@@ -1,0 +1,6 @@
+{
+  "name": "Cold Chain Telematics Monitor",
+  "description": "Flespi-powered cold chain telematics dashboard monitoring gateways, BLE temperature sensors, and threshold compliance in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
